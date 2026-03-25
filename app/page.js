@@ -1,6 +1,7 @@
 "use client";
 
 import { useEffect, useMemo, useState } from "react";
+import { supabase } from "../lib/supabase";
 
 const defaultTasks = [
   {
@@ -150,6 +151,15 @@ export default function Page() {
   });
 
   const [importText, setImportText] = useState("");
+  
+  const [email, setEmail] = useState("");
+  const [user, setUser] = useState(null);
+  const [authReady, setAuthReady] = useState(false);
+  const [authMessage, setAuthMessage] = useState("");
+  const [isSyncing, setIsSyncing] = useState(false);
+
+  const cloudLoadedRef = useRef(false);
+  const saveTimeoutRef = useRef(null);
 
   useEffect(() => {
     localStorage.setItem("yassine_tasks", JSON.stringify(tasks));
@@ -163,15 +173,78 @@ export default function Page() {
     localStorage.setItem("yassine_weekly_budget", weeklyBudget);
   }, [weeklyBudget]);
 
+    useEffect(() => {
+    supabase.auth.getUser().then(({ data }) => {
+      setUser(data.user ?? null);
+      setAuthReady(true);
+    });
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, session) => {
+      setUser(session?.user ?? null);
+      setAuthReady(true);
+    });
+
+    return () => subscription.unsubscribe();
+  }, []);
+
+    useEffect(() => {
+    if (!authReady) return;
+
+    if (user) {
+      loadCloudState(user);
+    } else {
+      cloudLoadedRef.current = false;
+    }
+  }, [user, authReady]);
+
   useEffect(() => {
     localStorage.setItem("yassine_monthly_credit_use", monthlyCreditUse);
   }, [monthlyCreditUse]);
+    
+  useEffect(() => {
+  if ("serviceWorker" in navigator) {
+    window.addEventListener("load", () => {
+      navigator.serviceWorker
+        .register("/sw.js")
+        .catch((error) =>
+          console.error("Service worker registration failed:", error)
+        );
+    });
+  }
+
     useEffect(() => {
-    if ("serviceWorker" in navigator) {
-      window.addEventListener("load", () => {
-        navigator.serviceWorker
-          .register("/sw.js")
-          .catch((error) => console.error("Service worker registration failed:", error));
+    if (!authReady || !user || !cloudLoadedRef.current) return;
+
+    if (saveTimeoutRef.current) {
+      clearTimeout(saveTimeoutRef.current);
+    }
+
+    saveTimeoutRef.current = setTimeout(async () => {
+      const payload = {
+        tasks,
+        instructions,
+        weeklyBudget,
+        monthlyCreditUse,
+      };
+
+      const { error } = await supabase.from("app_state").upsert({
+        user_id: user.id,
+        payload,
+        updated_at: new Date().toISOString(),
+      });
+
+      if (error) {
+        console.error("Save cloud state failed:", error);
+      }
+    }, 800);
+
+    return () => {
+      if (saveTimeoutRef.current) clearTimeout(saveTimeoutRef.current);
+    };
+  }, [tasks, instructions, weeklyBudget, monthlyCreditUse, user, authReady]);
+}, []);
       });
     }
   }, []);
@@ -232,6 +305,86 @@ export default function Page() {
 
   function deleteInstruction(id) {
     setInstructions((prev) => prev.filter((item) => item.id !== id));
+  }
+
+    function getCurrentPayload() {
+    return {
+      tasks,
+      instructions,
+      weeklyBudget,
+      monthlyCreditUse,
+    };
+  }
+
+  async function handleSignIn() {
+    if (!email.trim()) return;
+
+    const { error } = await supabase.auth.signInWithOtp({
+      email: email.trim(),
+      options: {
+        emailRedirectTo: window.location.origin,
+      },
+    });
+
+    if (error) {
+      setAuthMessage(error.message);
+      return;
+    }
+
+    setAuthMessage("Magic link sent. Check your email.");
+  }
+
+  async function handleSignOut() {
+    await supabase.auth.signOut();
+    setUser(null);
+    cloudLoadedRef.current = false;
+    setAuthMessage("Signed out.");
+  }
+
+  async function loadCloudState(currentUser) {
+    if (!currentUser) return;
+
+    setIsSyncing(true);
+
+    const { data, error } = await supabase
+      .from("app_state")
+      .select("payload")
+      .eq("user_id", currentUser.id)
+      .single();
+
+    if (error && error.code !== "PGRST116") {
+      console.error("Load cloud state failed:", error);
+      setIsSyncing(false);
+      return;
+    }
+
+    if (!data) {
+      const localPayload = getCurrentPayload();
+
+      const { error: insertError } = await supabase.from("app_state").upsert({
+        user_id: currentUser.id,
+        payload: localPayload,
+        updated_at: new Date().toISOString(),
+      });
+
+      if (insertError) {
+        console.error("Create cloud state failed:", insertError);
+      }
+
+      cloudLoadedRef.current = true;
+      setIsSyncing(false);
+      return;
+    }
+
+    const payload = data.payload || {};
+
+    if (payload.tasks) setTasks(payload.tasks);
+    if (payload.instructions) setInstructions(payload.instructions);
+    if (payload.weeklyBudget) setWeeklyBudget(String(payload.weeklyBudget));
+    if (payload.monthlyCreditUse) setMonthlyCreditUse(String(payload.monthlyCreditUse));
+
+    cloudLoadedRef.current = true;
+    setIsSyncing(false);
   }
 
   function exportData() {
