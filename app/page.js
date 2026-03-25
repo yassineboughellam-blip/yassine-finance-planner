@@ -166,6 +166,15 @@ export default function Page() {
   useEffect(() => {
     localStorage.setItem("yassine_monthly_credit_use", monthlyCreditUse);
   }, [monthlyCreditUse]);
+    useEffect(() => {
+    if ("serviceWorker" in navigator) {
+      window.addEventListener("load", () => {
+        navigator.serviceWorker
+          .register("/sw.js")
+          .catch((error) => console.error("Service worker registration failed:", error));
+      });
+    }
+  }, []);
 
   const completed = tasks.filter((task) => task.done).length;
   const progress = tasks.length ? Math.round((completed / tasks.length) * 100) : 0;
